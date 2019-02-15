@@ -21,13 +21,21 @@ using namespace std;
 string registerPlayer(string IP, int port, int sockfd);
 void *clientInput(void *threadArg);
 void *serverOutput(void *threadArg);
+void *P2Phost(void *P2Parg);
+void *P2Pplayer(void *P2Parg);
 
 struct ThreadArgs{
 	int port;
 	int sockfd;
 };
 pthread_mutex_t changeCommands = PTHREAD_MUTEX_INITIALIZER; //lock commands vector from having things added & removed at same time
-char sendline[ECHOMAX], recvline[ECHOMAX];
+char sendline[ECHOMAX], recvline[ECHOMAX], playLine[ECHOMAX];
+
+struct P2Pargs{
+	char IP[ECHOMAX];
+	char port[ECHOMAX];
+	int pCount;
+};
 
 void DieWithError(const char *errorMessage){ //included in sample code, carried over to project
         perror(errorMessage);
@@ -208,13 +216,38 @@ void *serverOutput(void *threadArg){
 			}
 			nextCommand = toPrint[0]; //either host or player
 			toPrint.erase(toPrint.begin());
+			pthread_t threadID;
 			if(nextCommand.compare("Host") == 0){
 				//spawn host thread
-				cout << "You are the host" << endl;
+				string playCount = toPrint[0];
+				toPrint.erase(toPrint.begin());
+				string toConnect = toPrint[0];
+				toPrint.erase(toPrint.begin());
+				string portToUse = toPrint[0];
+				toPrint.erase(toPrint.begin());
+				cout << "You are the host at " << toConnect << " & port " << portToUse << endl;
+				struct P2Pargs * gameDet;
+				gameDet = (struct P2Pargs *)malloc(sizeof(P2Pargs));
+				stpcpy(gameDet->IP, toConnect.c_str()); //passed args must be in char array
+				strcpy(gameDet->port, portToUse.c_str());
+				istringstream buffer(playCount);
+				buffer >> gameDet->pCount;
+				pthread_create(&threadID, NULL, P2Phost, (void *) gameDet);
+				
 			}else if(nextCommand.compare("Player") == 0){
 				//spawn player thread relative to that a host
-				cout << "You are the player" << endl;
-			}else{
+				string toConnect = toPrint[0];
+				toPrint.erase(toPrint.begin());
+				string portToUse = toPrint[0];
+				toPrint.erase(toPrint.begin());
+				cout << "You are the player at " << toConnect << " & port " << portToUse << endl;
+				struct P2Pargs * gameDet;
+				gameDet = (struct P2Pargs *)malloc(sizeof(P2Pargs));
+				stpcpy(gameDet->IP, toConnect.c_str()); //passed args must be in char array
+				strcpy(gameDet->port, portToUse.c_str());
+				pthread_create(&threadID, NULL, P2Pplayer, (void *) gameDet);
+				
+			}else{ //error returned
 				cout << nextCommand << endl;
 			}
 			
@@ -222,6 +255,9 @@ void *serverOutput(void *threadArg){
 			cout << "End" << endl;
 			
 		}else if(nextCommand.compare("deregister") == 0 || nextCommand.compare("Deregister") == 0){
+			if(toPrint.size() == 0){
+				readInput(sockfd);
+			}
 			message = toPrint[0];
 			toPrint.erase(toPrint.begin());
 			cout << message << endl;
@@ -233,6 +269,87 @@ void *serverOutput(void *threadArg){
 			
 	}
 }
+
+void *P2Phost(void *P2Parg){ //thread spawned for BINGO hosts
+	string IP;
+	int pCount;
+	unsigned short hostPort;
+	pthread_detach(pthread_self());
+	IP = string(((struct P2Pargs *) P2Parg ) -> IP); //convert args back to string
+	hostPort = (unsigned short)strtoul(((struct P2Pargs *) P2Parg ) -> port, NULL ,0);
+	pCount = ((struct P2Pargs *) P2Parg ) -> pCount;
+	free(P2Parg);
+	
+	int sock, connfd;                /* Socket */
+    struct sockaddr_in hostAddr; /* Local address */
+    struct sockaddr_in playAddr; /* Client address */
+    unsigned int cliAddrLen;         /* Length of incoming message */
+	
+	cout << "A" << endl;
+	
+	if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0)
+        DieWithError("server: socket() failed");
+
+    /* Construct local address structure */
+    memset(&hostAddr, 0, sizeof(hostAddr));   /* Zero out structure */
+    hostAddr.sin_family = AF_INET;                /* Internet address family */
+    hostAddr.sin_addr.s_addr = htonl(INADDR_ANY); /* Any incoming interface */
+    hostAddr.sin_port = htons(hostPort);      /* Local port */
+	
+	cout << "B" << endl;
+	
+	if (bind(sock, (struct sockaddr *) &hostAddr, sizeof(hostAddr)) < 0)
+        DieWithError("server: bind() failed");
+	
+	cout << "C" << endl;
+	
+	if (listen(sock, BACKLOG) < 0 )
+		DieWithError("server: listen() failed");
+	
+	cout << "D" << endl;
+	
+	for(int x = 0; x < pCount; x++){
+		cliAddrLen = sizeof(playAddr);
+		connfd = accept( sock, (struct sockaddr *) &playAddr, &cliAddrLen );
+		
+		cout << "E" << endl;
+		
+		printf("Handling client %s\n", inet_ntoa(playAddr.sin_addr));
+		string test = "TEST";
+		write(connfd, test.c_str(), test.size());
+	}
+}
+
+
+void *P2Pplayer(void *P2Parg){ //thread spawned for BINGO players
+	char IP[ECHOMAX];
+	unsigned short hostPort;
+	pthread_detach(pthread_self());
+	strcpy(IP, ((struct P2Pargs *) P2Parg ) -> IP); //convert args back to string
+	hostPort = (unsigned short)strtoul(((struct P2Pargs *) P2Parg ) -> port, NULL ,0);
+	free(P2Parg);
+	
+	int sockfd;
+	struct sockaddr_in hostAddr;
+	
+	sockfd = socket(AF_INET, SOCK_STREAM, 0);
+
+	bzero(&hostAddr, sizeof(hostAddr));
+	hostAddr.sin_family = AF_INET;
+	hostAddr.sin_port = htons(hostPort); //passed handshake port
+	inet_pton(AF_INET, IP, &hostAddr.sin_addr);
+	
+	connect(sockfd, (struct sockaddr *) &hostAddr, sizeof(hostAddr));
+	string test;
+	ssize_t n;
+	memset(playLine, 0, 255); //clean buffer before receiving next
+	if ( (n = read(sockfd, playLine, ECHOMAX) == 0) )
+		DieWithError("str_cli: server terminated prematurely");
+	test = string(playLine);
+	
+	cout << test << endl;
+}
+
 
 int main(int argc, char **argv){
 	int sockfd;
@@ -250,7 +367,6 @@ int main(int argc, char **argv){
 	
 	connect(sockfd, (struct sockaddr *) &servaddr, sizeof(servaddr));
 
-		
 	
 	pthread_t inThread;
 	struct ThreadArgs *inputArgs;

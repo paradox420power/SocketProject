@@ -26,6 +26,7 @@ struct player{
 };
 static vector<player> playerList; //vector to track all registered players
 pthread_mutex_t pListUpdate = PTHREAD_MUTEX_INITIALIZER; //only 1 thread should be modifying the List at a time
+bool freePorts[1000];
 
 struct ThreadArgs{
 	int sockfd;
@@ -47,6 +48,17 @@ int getPlayerIndex(int pSockfd){
 			index = x;
 	}
 	return index;
+}
+
+int getNextFreePort(){
+	int port = -1;
+	for(int x = 0; x < 1000; x++){
+		if(freePorts[x] == true){
+			port = x;
+			break;
+		}
+	}
+	return port;
 }
 
 void DieWithError(const char *errorMessage){//included in sample code, carried over to project
@@ -114,11 +126,11 @@ string registerPlayer(int sockfd, string passIP){
 	return pickedName; //empty if they disconnect, the name if they register correctly	
 }
 
-void spawnP2P(int currentSock, int playerReq){
+void spawnP2P(int currentSock, int playerReq, string IP, string port){
 	bool chosen[playerList.size()];
 	int pCount = 0;
 	int randPick;
-	string mes = "Start Player";
+	string mes = "Start Player " + IP + " " + port + " "; //tell them they are a player, on this IP, at this port #
 	while(pCount < playerReq){
 		randPick = rand() % playerList.size(); //get random number within bounds of array
 		if(chosen[randPick] == false && playerList[randPick].sockfd != currentSock){ //get random other player, not host
@@ -216,9 +228,19 @@ void *serverInterface(void *threadArgs){
 				buffer >> playerCount;
 				//get int & start game
 				if(playerCount < playerList.size()){
-					
-					write(sockfd, "Host", 5 );
-					spawnP2P(sockfd, playerCount);
+					int index = getPlayerIndex(sockfd);
+					string toConnect = playerList[index].IP;
+					int portToUse = getNextFreePort() + 36000; //add 36000 since my port range is [36000, 36999]
+					stringstream port;
+					port << portToUse;
+					if(portToUse != -1){
+						sendCom = "Host " + numeric + " " + toConnect + " " + port.str() + " "; //numeric is player count
+						write(sockfd, sendCom.c_str(), sendCom.size() );
+						spawnP2P(sockfd, playerCount, toConnect, port.str());
+					}else{ //all ports in use
+						sendCom = "NO_PORTS ";
+						write(sockfd, sendCom.c_str(), sendCom.size() );
+					}
 				}else
 					write(sockfd, "Insufficient", 12);
 				validInput = true;
@@ -271,11 +293,12 @@ int main(int argc, char **argv){
     struct sockaddr_in echoServAddr; /* Local address */
     struct sockaddr_in echoClntAddr; /* Client address */
     unsigned int cliAddrLen;         /* Length of incoming message */
-    char echoBuffer[MES_MAX];        /* Buffer for echo string */
     unsigned short echoServPort;     /* Server port */
-    int recvMsgSize;                 /* Size of received message */
 
     echoServPort = 36000;  //local port assigned for group number 35
+	freePorts[0] = false;
+	for(int x = 1; x < 1000; x++)
+		freePorts[x] = true;
 
     /* Create socket for sending/receiving datagrams */
     if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0)
