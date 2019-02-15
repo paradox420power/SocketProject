@@ -10,68 +10,64 @@
 #include <sstream>
 #include <unistd.h>
 #include <iostream>
+#include <pthread.h>
+#include <semaphore.h>
 
 #define ECHOMAX 255             /* Longest string to echo */
 #define BACKLOG 128
 
 using namespace std;
 
-struct player{
-	string name;
-	string IP;
-	string port;
+string registerPlayer(string IP, int port, int sockfd);
+void *clientInput(void *threadArg);
+void *serverOutput(void *threadArg);
+
+struct ThreadArgs{
+	int port;
+	int sockfd;
 };
+pthread_mutex_t changeCommands = PTHREAD_MUTEX_INITIALIZER; //lock commands vector from having things added & removed at same time
+char sendline[ECHOMAX], recvline[ECHOMAX];
 
 void DieWithError(const char *errorMessage){ //included in sample code, carried over to project
         perror(errorMessage);
         exit(1);
 }
 
-void clientInput(FILE *fp, int sockfd){
+//registering is a back & forth until success so it is better to have a method of input & output
+string registerPlayer(string IP, int port, int sockfd){
 	ssize_t n;
-    char sendline[ECHOMAX], recvline[ECHOMAX];
-	
-	//know what command was sent & what return to expect
-	string command = ""; //Register, Query, Start, Query, End, Deregister
-	string value = "";
-	string IP = "";
-	string port = "";
-	string output;
-	string message;
-	bool validInput;
-	
-	bool unreg = true;
-	cout << "Please register: (formet Register <name> <IP> <port>" << endl;
-	while(unreg && fgets(sendline, ECHOMAX, fp) != NULL){ //after connecting, register
-		string message = string(sendline); //convert char message into string
-		command = ""; //reset fields
-		value = "";
-		int count = 0;
-		istringstream iss(message); //delimit spaces from the message
+	string pickedName = "";
+	bool success = false;
+	string input, command, name, part;
+	int count = 0;
+	cout << "Please Register: (format Register <player name>" << endl;
+	while(success == false && fgets(sendline, ECHOMAX, stdin) != NULL){
+		input = string(sendline);
+		command = ""; //reset fields to be sure
+		name = "";
+		count = 0;
+		istringstream buf(input);
 		do{
-			string part;
-			iss >> part;
+			buf >> part;
 			switch(count){
 				case 0: command = part;
 					break;
-				case 1: value = part;
-					break;
-				case 2: IP = part;
-					break;
-				case 3: port = part;
+				case 1: name = part;
 					break;
 				default: //do nothing
 					break;
 			}
 			count++;
-		}while(iss);
+		}while(buf);
 		
 		if(command.compare("register") == 0 || command.compare("Register") == 0){ //Register Player IP
 			//add player to list
-			validInput = true;
-			if(value.compare("") != 0 && IP.compare("") != 0 && port.compare("") != 0){ //ensure all data was passed to server
-				write(sockfd, sendline, strlen(sendline));
-				//make sure server completed successfully
+			if(name.compare("") != 0){ //make sure name was passed
+				stringstream ss;
+				ss << port;
+				input = command + " " + name + " 0.0.0.0 " + ss.str() + " ";
+				write(sockfd, input.c_str(), input.size());
 				memset(recvline, 0 ,255);
 				if ( (n = read(sockfd, recvline, ECHOMAX) == 0) )
 					DieWithError("str_cli: server terminated prematurely");
@@ -79,117 +75,163 @@ void clientInput(FILE *fp, int sockfd){
 				istringstream buf(output);
 				int successField;
 				buf >> successField;
-				cout << successField << endl;
 				if(successField == 0){
 					cout << "Registered" << endl;
-					unreg = false;
+					pickedName = name;
+					success = true;
 				}else{
 					cout << "Failed to Register" << endl;
 				}
-			}else{
-				cout << "Not all fields full" << endl;
 			}
 		}else{
 			cout << "Incorrect command issued" << endl;
 		}
 	}
 	
-	//continuously loop
-	while (fgets(sendline, ECHOMAX, fp) != NULL) {
-		
-		//translate snet command to anticipate return
-		string message = string(sendline); //convert char message into string
-		command = ""; //reset fields
-		value = "";
-		int count = 0;
-		istringstream iss(message); //delimit spaces from the message
-		do{
-			string part;
-			iss >> part;
-			switch(count){
-				case 0: command = part;
-					break;
-				case 1: value = part;
-					break;
-				default: //do nothing
-					break;
+	if(success){ //only spawn output thread if client registered
+		pthread_t outThread; //now that they are registered we should split off a server output thread
+		struct ThreadArgs *outputArgs;
+		outputArgs = (struct ThreadArgs *)malloc(sizeof(struct ThreadArgs));
+		outputArgs -> sockfd = sockfd;
+		pthread_create(&outThread, NULL, serverOutput, (void *) outputArgs); //should be passed same sockfd as client input
+	}
+	return pickedName;
+}
+
+bool stillConnected = true;
+
+void *clientInput(void *threadArg){
+	int sockfd, port, count;
+	string myName, message, IP, command, value, part;
+	pthread_detach(pthread_self());
+	sockfd = ((struct ThreadArgs *) threadArg ) -> sockfd;
+	port = ((struct ThreadArgs *) threadArg ) -> port;
+	myName = registerPlayer(IP, port, sockfd); //cal this here
+	free(threadArg);
+	
+	if(myName.compare("") != 0){ //actually registered a name
+		while(stillConnected && fgets(sendline, ECHOMAX, stdin) != NULL){
+			message = string(sendline);
+			command = "";
+			value = "";
+			count = 0;
+			istringstream buf(message);
+			do{
+				buf >> part;
+				switch(count){
+					case 0: command = part;
+						break;
+					case 1: value = part;
+						break;
+					default: //do nothing
+						break;
+				}
+				count++;
+			}while(buf);
+			if(command.compare("deregister") == 0 || command.compare("Deregister") == 0){
+				if(value.compare(myName) == 0){
+					write(sockfd, sendline, strlen(sendline));
+					stillConnected = false;
+				}else{
+					cout << "You may only deregister yourself" << endl;
+				}
+			}else{
+				write(sockfd, sendline, strlen(sendline));
 			}
-			count++;
-		}while(iss);
-		
-		//send a command to the server
-		if(command.compare("register") != 0 && command.compare("Register") != 0){ //don't allow 1 client to register twice
-			write(sockfd, sendline, strlen(sendline));
-			if ( (n = read(sockfd, recvline, ECHOMAX) == 0) )
-				DieWithError("str_cli: server terminated prematurely");
-			output = string(recvline);
 		}
+	} //otherwise the user disconnected before registering
+	if(stillConnected){ //if the user exits prematurely the client must auto-deregister
+		string autoDereg = "Deregister " + myName;
+		write(sockfd, autoDereg.c_str(), autoDereg.size());
+		stillConnected = false;
+	}
+}
+
+vector<string> toPrint; //this will be the vector of everything the server is sending to the client
+
+void readInput(int sockfd){ //this get calls a bit by the server, make it it's own method
+	ssize_t n;
+	string message, part;
+	memset(recvline, 0, 255); //clean buffer before receiving next
+	if ( (n = read(sockfd, recvline, ECHOMAX) == 0) )
+		DieWithError("str_cli: server terminated prematurely");
+	message = string(recvline);
+	istringstream buffer(message);
+	while(getline(buffer, part, ' ')){ //read everything from recvline & push back delimited by spaces
+		toPrint.push_back(part);
+	}
+}
+
+void *serverOutput(void *threadArg){
+	ssize_t n;
+	int sockfd;
+	pthread_detach(pthread_self());
+	sockfd = ((struct ThreadArgs *) threadArg ) -> sockfd;
+	free(threadArg);
+	string nextCommand, message, part;
+	
+	while(stillConnected || toPrint.size() > 0){ //keep looping while client is passing commands or the client has output to handle
+		readInput(sockfd);
 		
-		//interpret the command
-		validInput = false;
-		if(command.compare("register") == 0 || command.compare("Register") == 0){ //Register Player IP
-			//add player to list
-			cout << "You are already registered" << endl;
-			
-		}else if(command.compare("query") == 0 || command.compare("Query") == 0){ //Query Players or Games
-			if(value.compare("players") == 0 || value.compare("Players") == 0){
-				//expect list of players
-				vector<string> triples;
-				istringstream buffer(output);
-				string part;
-				while(getline(buffer, part, ' ')){
-					triples.push_back(part);
+		//interpret command
+		nextCommand = toPrint[0];
+		toPrint.erase(toPrint.begin());
+		if(nextCommand.compare("Query") == 0 || nextCommand.compare("query") == 0){
+			nextCommand = toPrint[0];
+			toPrint.erase(toPrint.begin());
+			if(nextCommand.compare("players") == 0 || nextCommand.compare("Players") == 0){
+				if(toPrint.size() == 0){ //need to ensure we have the player count in toPrint before continuing
+					readInput(sockfd);
 				}
-				int playerCount; //get an expected player count output
-				istringstream convert(triples[0]); //first value will be palyer count
+				int playerCount;
+				istringstream convert(toPrint[0]); //first value will be palyer count
 				convert >> playerCount;
-				triples.erase(triples.begin()); //remove head
+				toPrint.erase(toPrint.begin()); //remove head
 				int readPlayers = 0;
-				while(!triples.empty()){ //read anything else in the buffer
-					cout << "Player " << triples[0] << " at IP " << triples[1] << " and port " << triples[2] << endl;
+				while(readPlayers < playerCount){
+					if(toPrint.size() == 0){ //we've read everything in toPrint, but not all palyers have been read in yet
+						readInput(sockfd);
+					}
+					cout << "Player " << toPrint[0] << " at IP " << toPrint[1] << " and port " << toPrint[2] << endl; //each player triple should be passed all together
 					readPlayers++; //increment the player count
-					triples.erase(triples.begin(), triples.begin()+3); //erase the read palyer
-				}
-				while(readPlayers < playerCount){ //repeat above for all players
-					memset(recvline, 0, 255); //clean old entries in buffer
-					if ( (n = read(sockfd, recvline, ECHOMAX) == 0) ) //rea anything in the buffer
-						DieWithError("str_cli: server terminated prematurely");
-					output = string(recvline);
-					istringstream buffer(output);
-					string part;
-					while(getline(buffer, part, ' ')){ //break inputs by spaace & push to vector
-						triples.push_back(part);
-					}
-					while(!triples.empty()){ //read triplets from vector & print to screen
-						cout << "Player " << triples[0] << " at IP " << triples[1] << " and port " << triples[2] << endl;
-						readPlayers++; //incremnet read player count
-						triples.erase(triples.begin(), triples.begin()+3); //erase read palyers from vector
-					}
+					toPrint.erase(toPrint.begin(), toPrint.begin()+3); //erase the read palyer
 				}
 				
-			}else if(value.compare("games") == 0 || value.compare("Games") == 0){
-				//expect list of games
-				cout << output << endl;
+				
+			}else{ //should be games query
+				cout << "Query Games" << endl;
 			}
 			
-		}else if(command.compare("start") == 0 || command.compare("Start") == 0){ //Start Game k
-			//handle new game
-			cout << output << endl;
+		}else if(nextCommand.compare("start") == 0 || nextCommand.compare("Start") == 0){
+			if(toPrint.size() == 0){
+				readInput(sockfd);
+			}
+			nextCommand = toPrint[0]; //either host or player
+			toPrint.erase(toPrint.begin());
+			if(nextCommand.compare("Host") == 0){
+				//spawn host thread
+				cout << "You are the host" << endl;
+			}else if(nextCommand.compare("Player") == 0){
+				//spawn player thread relative to that a host
+				cout << "You are the player" << endl;
+			}else{
+				cout << nextCommand << endl;
+			}
 			
-		}else if(command.compare("end") == 0 || command.compare("End") == 0){ //End <Game ID>
-			//end any client side game attributes
-			cout << output << endl;
+		}else if(nextCommand.compare("end") == 0 || nextCommand.compare("End") == 0){
+			cout << "End" << endl;
 			
-		}else if(command.compare("deregister") == 0 || command.compare("Deregister") == 0){ //Deregister Player
-			//remove self, expected to end client soon after
-			cout << output << endl;
-		}else{
-			cout << "Command unrecognized: " << output << endl;
+		}else if(nextCommand.compare("deregister") == 0 || nextCommand.compare("Deregister") == 0){
+			message = toPrint[0];
+			toPrint.erase(toPrint.begin());
+			cout << message << endl;
+			
+		}else{ //should be an error code
+			cout << "Possible Error" << endl;
+			
 		}
-		//cout << "End process" << endl;
-		memset(recvline, 0, 255); //clean buffer before receiving new input
-		
-    }
+			
+	}
 }
 
 int main(int argc, char **argv){
@@ -205,10 +247,20 @@ int main(int argc, char **argv){
 	servaddr.sin_family = AF_INET;
 	servaddr.sin_port = htons(36000); //hardcoded handshake port
 	inet_pton(AF_INET, argv[1], &servaddr.sin_addr);
-
+	
 	connect(sockfd, (struct sockaddr *) &servaddr, sizeof(servaddr));
 
-	clientInput(stdin, sockfd); //client is created, now can interact
+		
+	
+	pthread_t inThread;
+	struct ThreadArgs *inputArgs;
+	inputArgs = (struct ThreadArgs *)malloc(sizeof(struct ThreadArgs));
+	inputArgs -> sockfd = sockfd;
+	inputArgs -> port = servaddr.sin_port;
+	
+	
+	pthread_create(&inThread, NULL, clientInput, (void *) inputArgs);
+	pthread_exit(NULL); //don't end program because this thread ended
 
 	exit(0);
 }

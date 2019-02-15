@@ -22,6 +22,7 @@ struct player{
 	string name;
 	string IP;
 	string port;
+	int sockfd;
 };
 static vector<player> playerList; //vector to track all registered players
 pthread_mutex_t pListUpdate = PTHREAD_MUTEX_INITIALIZER; //only 1 thread should be modifying the List at a time
@@ -39,21 +40,31 @@ int getPlayerIndex(string pName){
 	return index;
 }
 
+int getPlayerIndex(int pSockfd){
+	int index = -1;
+	for(int x = 0; x < playerList.size(); x++){
+		if(playerList[x].sockfd == pSockfd)
+			index = x;
+	}
+	return index;
+}
+
 void DieWithError(const char *errorMessage){//included in sample code, carried over to project
 	perror(errorMessage);
 	exit(1);
 }
 
-int registerPlayer(int sockfd){
+
+string registerPlayer(int sockfd, string passIP){
 	ssize_t n;
     char    line[MES_MAX];
 	string command = ""; //Register, Query, Start, Query, End, Deregister
 	string name = ""; //<Player Name>, Players, Game, Games (determined by command)
-	string IP = ""; //IP Addr., Player Count, Game ID (determined by command)
+	string IP = passIP; //IP Addr., Player Count, Game ID (determined by command)
 	string port = ""; //only used in register command
 	bool unreg = true;
 	bool stillConnected = true;
-	int isReg = 0;
+	string pickedName = "";
 	
 	while(unreg && stillConnected){
 		if ( (n = read(sockfd, line, MES_MAX)) == 0 )
@@ -70,7 +81,7 @@ int registerPlayer(int sockfd){
 					break;
 				case 1: name = part;
 					break;
-				case 2: IP = part;
+				case 2: IP = passIP; //use the IP the server received connection from
 					break;
 				case 3: port = part;
 				default: //do nothing
@@ -87,9 +98,10 @@ int registerPlayer(int sockfd){
 					playerList[playerList.size()-1].name = name;
 					playerList[playerList.size()-1].IP = IP;
 					playerList[playerList.size()-1].port = port;
+					playerList[playerList.size()-1].sockfd = sockfd;
 					write(sockfd, "0", 1 ); //return success
 					unreg = false;
-					isReg = 1;
+					pickedName = name;
 				}else{
 					write(sockfd, "1", 1 ); //return failure
 				}
@@ -99,21 +111,40 @@ int registerPlayer(int sockfd){
 			
 		}
 	}
-	return isReg; //0 if they disconnect, 1 if they register correctly	
+	return pickedName; //empty if they disconnect, the name if they register correctly	
+}
+
+void spawnP2P(int currentSock, int playerReq){
+	bool chosen[playerList.size()];
+	int pCount = 0;
+	int randPick;
+	string mes = "Start Player";
+	while(pCount < playerReq){
+		randPick = rand() % playerList.size(); //get random number within bounds of array
+		if(chosen[randPick] == false && playerList[randPick].sockfd != currentSock){ //get random other player, not host
+			write(playerList[randPick].sockfd, mes.c_str(), mes.size()); //notify them
+			chosen[randPick] = true;
+			pCount++;
+		}
+	}
 }
 
 void *serverInterface(void *threadArgs){
     
 	int sockfd;
+	string clientName;
 	pthread_detach(pthread_self());
 	sockfd = ((struct ThreadArgs *) threadArgs ) -> sockfd;
 	free(threadArgs);
+	int index = getPlayerIndex(sockfd);
+	clientName = playerList[index].name;
 	ssize_t n;
     char    line[MES_MAX];
 	string command = ""; //Register, Query, Start, Query, End, Deregister
 	string value = ""; //<Player Name>, Players, Game, Games (determined by command)
 	string numeric = ""; //IP Addr., Player Count, Game ID (determined by command)
 	string port = ""; //only used in register command
+	string sendCom;
 	bool validInput = false;
 	
 	printf("Handling %d\n", sockfd); //debug info
@@ -155,6 +186,9 @@ void *serverInterface(void *threadArgs){
 		if(command.compare("query") == 0 || command.compare("Query") == 0){ //Query Players or Games
 			
 			if(value.compare("players") == 0 || value.compare("Players") == 0){
+				sendCom = command + " " + value + " ";
+				write(sockfd, sendCom.c_str(), sendCom.size());
+				
 				stringstream ss;
 				ss << playerList.size();
 				string playerCount = ss.str() + " ";
@@ -167,36 +201,52 @@ void *serverInterface(void *threadArgs){
 				validInput = true;
 				
 			}else if(value.compare("games") == 0 || value.compare("Games") == 0){
-				write(sockfd, "ask games", 9 );
+				sendCom = command + " " + value + " ";
+				write(sockfd, sendCom.c_str(), sendCom.size());
+				write(sockfd, "ask", 3 );
 				validInput = true;
 			}
 			
 		}else if(command.compare("start") == 0 || command.compare("Start") == 0){ //Start Game k
 			if(value.compare("game") == 0 || value.compare("Game") == 0){
+				sendCom = command + " ";
+				write(sockfd, sendCom.c_str(), sendCom.size());
 				int playerCount;
 				istringstream buffer(numeric);
-				iss >> playerCount;
+				buffer >> playerCount;
 				//get int & start game
-				write(sockfd, "Start Game", 11 );
+				if(playerCount < playerList.size()){
+					
+					write(sockfd, "Host", 5 );
+					spawnP2P(sockfd, playerCount);
+				}else
+					write(sockfd, "Insufficient", 12);
 				validInput = true;
 			}
 			
 		}else if(command.compare("end") == 0 || command.compare("End") == 0){ //End <Game ID>
 			//search & remove ID from list
-			write(sockfd, "End Game", 8 );
+			sendCom = command + " ";
+			write(sockfd, sendCom.c_str(), sendCom.size());
+			write(sockfd, "End", 3 );
 			validInput = true;
 			
 		}else if(command.compare("deregister") == 0 || command.compare("Deregister") == 0){ //Deregister Player
 			//search & remove player from list
+			sendCom = command + " ";
+			write(sockfd, sendCom.c_str(), sendCom.size());
 			pthread_mutex_lock(&pListUpdate); //don't execute if someon else is (de)registering
 			//TODO
+			index = getPlayerIndex(value); //each player has unique sockfd
+			if(index != -1)
+				playerList.erase(playerList.begin() + index);
 			pthread_mutex_unlock(&pListUpdate);
-			write(sockfd, "Drop Player", 11 );
+			write(sockfd, "Drop", 4 );
 			validInput = true;
 		}
 		
 		if(!validInput){
-			write(sockfd, "Input not recognized", 31 );
+			write(sockfd, "Error", 5 );
 			validInput = true;
 		}
 		
@@ -205,6 +255,12 @@ void *serverInterface(void *threadArgs){
 		if ( (n = read(sockfd, line, MES_MAX)) == 0 ) //read next command
    	    	stillConnected = false; /* connection closed by other end */
 	}
+	if(playerList[getPlayerIndex(sockfd)].name.compare(clientName) == 0){//disconnected prematurely, remove from player list
+		pthread_mutex_lock(&pListUpdate); //lock mutex since we are editing
+		playerList.erase(playerList.begin() + getPlayerIndex(sockfd)); //clear
+		pthread_mutex_unlock(&pListUpdate);
+	}
+	cout << "Connection: " << sockfd << " closed" << endl;
 	//return; //no return value
 	
 }
@@ -239,7 +295,7 @@ int main(int argc, char **argv){
 	if (listen(sock, BACKLOG) < 0 )
 		DieWithError("server: listen() failed");
 	
-	int isReg;
+	string regName;
 	pthread_t threadID;
 	struct ThreadArgs *threadArgs;
 	
@@ -247,13 +303,17 @@ int main(int argc, char **argv){
 		cliAddrLen = sizeof(echoClntAddr);
 		connfd = accept( sock, (struct sockaddr *) &echoClntAddr, &cliAddrLen );
 		
+		cout << inet_ntoa(echoServAddr.sin_addr) << endl;
+		cout << inet_ntoa(echoClntAddr.sin_addr) << endl;
+		
 		pthread_mutex_lock(&pListUpdate); //lock player list before modifying it
-		isReg = registerPlayer(connfd); //register before forking off
+		regName = registerPlayer(connfd, inet_ntoa(echoClntAddr.sin_addr)); //register before creating next thread
 		pthread_mutex_unlock(&pListUpdate); //unlock for further editing
 		
-		if(isReg == 1){
+		if(regName.compare("") != 0){
 			
 			printf("Handling client %s\n", inet_ntoa(echoClntAddr.sin_addr));
+			//printf("on port %d\n", (echoServAddr.sin_port));
 			threadArgs = (struct ThreadArgs *)malloc(sizeof(struct ThreadArgs));
 			threadArgs -> sockfd = connfd;
 			pthread_create(&threadID, NULL, serverInterface, (void *) threadArgs);
