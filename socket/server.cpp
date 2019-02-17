@@ -24,8 +24,15 @@ struct player{
 	string port;
 	int sockfd;
 };
+struct game{
+	int gameID;
+	string caller;
+	vector<string> players;
+};
 static vector<player> playerList; //vector to track all registered players
-pthread_mutex_t pListUpdate = PTHREAD_MUTEX_INITIALIZER; //only 1 thread should be modifying the List at a time
+static vector<game> gameList;
+pthread_mutex_t pListUpdate = PTHREAD_MUTEX_INITIALIZER; //only 1 thread should be modifying the player List at a time
+pthread_mutex_t gListUpdate = PTHREAD_MUTEX_INITIALIZER; //only 1 thread should be modifying the game List at a time
 bool freePorts[1000];
 
 struct ThreadArgs{
@@ -50,16 +57,41 @@ int getPlayerIndex(int pSockfd){
 	return index;
 }
 
+int getGameIndex(int ID){
+	int index = -1;
+	for(int x = 0; x < gameList.size(); x++){
+		if(gameList[x].gameID == ID)
+			index = x;
+	}
+	return index;
+}
+
+bool getGameIndex(string name){ //used to see if player is involved in a game
+	bool index = false;
+	for(int x = 0; x < gameList.size(); x++){
+		if(gameList[x].caller.compare(name) == 0) //check hosts
+			index = true;
+		for(int y = 0; y < gameList[x].players.size(); y++){ //check players
+			if(gameList[x].players[y].compare(name) == 0)
+				index = true;
+		}
+	}
+	return index; //index of involvement not relevant
+}
+
 int getNextFreePort(){
 	int port = -1;
 	for(int x = 0; x < 1000; x++){
 		if(freePorts[x] == true){
 			port = x;
+			freePorts[x] = false;
 			break;
 		}
 	}
 	return port;
 }
+
+
 
 void DieWithError(const char *errorMessage){//included in sample code, carried over to project
 	perror(errorMessage);
@@ -135,6 +167,7 @@ void spawnP2P(int currentSock, int playerReq, string IP, string port){
 		randPick = rand() % playerList.size(); //get random number within bounds of array
 		if(chosen[randPick] == false && playerList[randPick].sockfd != currentSock){ //get random other player, not host
 			write(playerList[randPick].sockfd, mes.c_str(), mes.size()); //notify them
+			gameList[gameList.size()-1].players.push_back(playerList[randPick].name); //add player to list of those reigstered to this game
 			chosen[randPick] = true;
 			pCount++;
 		}
@@ -196,7 +229,7 @@ void *serverInterface(void *threadArgs){
 		validInput = false;
 		//if(command.compare("register") == 0 || command.compare("Register") == 0){ //everyone should register before entering this function
 		if(command.compare("query") == 0 || command.compare("Query") == 0){ //Query Players or Games
-			
+			string toSend;
 			if(value.compare("players") == 0 || value.compare("Players") == 0){
 				sendCom = command + " " + value + " ";
 				write(sockfd, sendCom.c_str(), sendCom.size());
@@ -207,15 +240,35 @@ void *serverInterface(void *threadArgs){
 				write(sockfd, playerCount.c_str(), playerCount.size());
 				
 				for(int x = 0; x < playerList.size(); x++){
-					string toSend = playerList[x].name + " " + playerList[x].IP + " " + playerList[x].port + " "; //end with space to ensure delimiting
+					toSend = playerList[x].name + " " + playerList[x].IP + " " + playerList[x].port + " "; //end with space to ensure delimiting
 					write(sockfd, toSend.c_str(), toSend.size());
 				}
 				validInput = true;
 				
 			}else if(value.compare("games") == 0 || value.compare("Games") == 0){
+				//tell client what to read
 				sendCom = command + " " + value + " ";
 				write(sockfd, sendCom.c_str(), sendCom.size());
-				write(sockfd, "ask", 3 );
+				
+				//get game list length
+				stringstream ss;
+				ss << gameList.size();
+				string gameCount = ss.str() + " ";
+				write(sockfd, gameCount.c_str(), gameCount.size());
+				//write each value of the game
+				for(int x = 0; x < gameList.size(); x++){
+					stringstream gg;
+					gg << gameList[x].gameID;
+					toSend = gg.str() + " " + gameList[x].caller + " ";
+					write(sockfd, toSend.c_str(), toSend.size());
+					for(int y = 0; y < gameList[x].players.size(); y++){ //iterate players to the sned list
+						toSend = gameList[x].players[y] + " ";
+						write(sockfd, toSend.c_str(), toSend.size());
+					}
+					toSend = "next "; //flag to indicate next game
+					write(sockfd, toSend.c_str(), toSend.size());
+				}
+				
 				validInput = true;
 			}
 			
@@ -234,9 +287,14 @@ void *serverInterface(void *threadArgs){
 					stringstream port;
 					port << portToUse;
 					if(portToUse != -1){
+						pthread_mutex_lock(&gListUpdate); //allow one editor in gList
+						gameList.push_back(game());//create a new game
+						gameList[gameList.size()-1].gameID = portToUse; //request port will double as it's unique ID
+						gameList[gameList.size()-1].caller = clientName; //client with request is the host
 						sendCom = "Host " + numeric + " " + toConnect + " " + port.str() + " "; //numeric is player count
 						write(sockfd, sendCom.c_str(), sendCom.size() );
-						spawnP2P(sockfd, playerCount, toConnect, port.str());
+						spawnP2P(sockfd, playerCount, toConnect, port.str()); //this will pick players & push them to the gameList
+						pthread_mutex_unlock(&gListUpdate); //done editing the list
 					}else{ //all ports in use
 						sendCom = "NO_PORTS ";
 						write(sockfd, sendCom.c_str(), sendCom.size() );
@@ -248,7 +306,17 @@ void *serverInterface(void *threadArgs){
 			
 		}else if(command.compare("end") == 0 || command.compare("End") == 0){ //End <Game ID>
 			//search & remove ID from list
+			istringstream buffer(value);
+			int gameID;
+			buffer >> gameID;
+			int index = getGameIndex(gameID);
+			pthread_mutex_lock(&gListUpdate); //lock mutex to edit the list
+			if(index != -1){ //found game, remove it
+				gameList.erase(gameList.begin() + index);
+			}
+			pthread_mutex_unlock(&gListUpdate); //unlock now
 			sendCom = command + " ";
+			
 			write(sockfd, sendCom.c_str(), sendCom.size());
 			write(sockfd, "End", 3 );
 			validInput = true;
@@ -258,7 +326,6 @@ void *serverInterface(void *threadArgs){
 			sendCom = command + " ";
 			write(sockfd, sendCom.c_str(), sendCom.size());
 			pthread_mutex_lock(&pListUpdate); //don't execute if someon else is (de)registering
-			//TODO
 			index = getPlayerIndex(value); //each player has unique sockfd
 			if(index != -1)
 				playerList.erase(playerList.begin() + index);
@@ -282,6 +349,7 @@ void *serverInterface(void *threadArgs){
 		playerList.erase(playerList.begin() + getPlayerIndex(sockfd)); //clear
 		pthread_mutex_unlock(&pListUpdate);
 	}
+	close(sockfd);
 	cout << "Connection: " << sockfd << " closed" << endl;
 	//return; //no return value
 	
