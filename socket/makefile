@@ -1,6 +1,6 @@
-server: server.cpp
-	g++ -o server -pthread server.cpp
-client: client.cpp
-	g++ -o client -pthread client.cpp
+manager: server.cpp
+	g++ -o manager -pthread server.cpp
+bingo: client.cpp
+	g++ -o bingo -pthread client.cpp
 clean:
-	rm server client
+	rm manager bingo
