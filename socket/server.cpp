@@ -104,7 +104,7 @@ string registerPlayer(int sockfd, string passIP){
     char    line[MES_MAX];
 	string command = ""; //Register, Query, Start, Query, End, Deregister
 	string name = ""; //<Player Name>, Players, Game, Games (determined by command)
-	string IP = passIP; //IP Addr., Player Count, Game ID (determined by command)
+	string IP = ""; //passIP; //IP Addr., Player Count, Game ID (determined by command)
 	string port = ""; //only used in register command
 	bool unreg = true;
 	bool stillConnected = true;
@@ -125,7 +125,7 @@ string registerPlayer(int sockfd, string passIP){
 					break;
 				case 1: name = part;
 					break;
-				case 2: IP = passIP; //use the IP the server received connection from
+				case 2: IP = part; //use the IP the server received connection from
 					break;
 				case 3: port = part;
 				default: //do nothing
@@ -133,7 +133,9 @@ string registerPlayer(int sockfd, string passIP){
 			}
 			count++;
 		}while(iss);
-		//interpret the command
+		
+		cout << command << " " << name << " " << IP << " " << port << endl;
+		
 		if(command.compare("register") == 0 || command.compare("Register") == 0){ //Register Player IP
 			//add player to list
 			if(name.compare("") != 0 && IP.compare("") != 0 && port.compare("") != 0){ //ensure all data was passed to server
@@ -344,10 +346,13 @@ void *serverInterface(void *threadArgs){
 		if ( (n = read(sockfd, line, MES_MAX)) == 0 ) //read next command
    	    	stillConnected = false; /* connection closed by other end */
 	}
-	if(playerList[getPlayerIndex(sockfd)].name.compare(clientName) == 0){//disconnected prematurely, remove from player list
-		pthread_mutex_lock(&pListUpdate); //lock mutex since we are editing
-		playerList.erase(playerList.begin() + getPlayerIndex(sockfd)); //clear
-		pthread_mutex_unlock(&pListUpdate);
+	int pIndex = getPlayerIndex(sockfd);
+	if(playerList.size()> 0 && pIndex != -1){
+		if(playerList[pIndex].name.compare(clientName) == 0){//disconnected prematurely, remove from player list
+			pthread_mutex_lock(&pListUpdate); //lock mutex since we are editing
+			playerList.erase(playerList.begin() + getPlayerIndex(sockfd)); //clear
+			pthread_mutex_unlock(&pListUpdate);
+		}
 	}
 	close(sockfd);
 	cout << "Connection: " << sockfd << " closed" << endl;
@@ -376,7 +381,7 @@ int main(int argc, char **argv){
     memset(&echoServAddr, 0, sizeof(echoServAddr));   /* Zero out structure */
     echoServAddr.sin_family = AF_INET;                /* Internet address family */
     echoServAddr.sin_addr.s_addr = htonl(INADDR_ANY); /* Any incoming interface */
-    echoServAddr.sin_port = htons(echoServPort);      /* Local port */
+    echoServAddr.sin_port = echoServPort;      /* Local port */
 	
 	
     /* Bind to the local address */

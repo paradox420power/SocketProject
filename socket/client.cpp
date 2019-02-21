@@ -18,7 +18,7 @@
 
 using namespace std;
 
-string registerPlayer(string IP, int port, int sockfd);
+string registerPlayer(int port, int sockfd);
 void *clientInput(void *threadArg);
 void *serverOutput(void *threadArg);
 void *P2Phost(void *P2Parg);
@@ -44,25 +44,29 @@ void DieWithError(const char *errorMessage){ //included in sample code, carried 
 }
 
 //registering is a back & forth until success so it is better to have a method of input & output
-string registerPlayer(string IP, int port, int sockfd){
+string registerPlayer(int port, int sockfd){
 	ssize_t n;
 	string pickedName = "";
 	bool success = false;
-	string input, command, name, part;
+	string input, command, name, IP, part;
 	int count = 0;
 	cout << "Please Register: (Register <player name>)" << endl;
 	while(success == false && fgets(sendline, ECHOMAX, stdin) != NULL){
 		input = string(sendline);
 		command = ""; //reset fields to be sure
 		name = "";
+		IP = "";
 		count = 0;
 		istringstream buf(input);
 		do{
+			part = ""; //reset part
 			buf >> part;
 			switch(count){
 				case 0: command = part;
 					break;
 				case 1: name = part;
+					break;
+				case 2: IP = part;
 					break;
 				default: //do nothing
 					break;
@@ -72,10 +76,10 @@ string registerPlayer(string IP, int port, int sockfd){
 		
 		if(command.compare("register") == 0 || command.compare("Register") == 0){ //Register Player IP
 			//add player to list
-			if(name.compare("") != 0){ //make sure name was passed
+			if(name.compare("") != 0 && IP.compare("") != 0){ //make sure name was passed
 				stringstream ss;
 				ss << port;
-				input = command + " " + name + " 0.0.0.0 " + ss.str() + " ";
+				input = command + " " + name + " " + IP + " " + ss.str() + " ";
 				write(sockfd, input.c_str(), input.size());
 				memset(recvline, 0 ,255);
 				if ( (n = read(sockfd, recvline, ECHOMAX) == 0) )
@@ -91,6 +95,8 @@ string registerPlayer(string IP, int port, int sockfd){
 				}else{
 					cout << "Failed to Register" << endl;
 				}
+			}else{
+				cout << "Failed to enter Player Name & IP" << endl;
 			}
 		}else{
 			cout << "Incorrect command issued" << endl;
@@ -112,11 +118,11 @@ string myName; //shared across input & P2P threads
 
 void *clientInput(void *threadArg){
 	int sockfd, port, count;
-	string message, IP, command, value, part;
+	string message, command, value, part;
 	pthread_detach(pthread_self());
 	sockfd = ((struct ThreadArgs *) threadArg ) -> sockfd;
 	port = ((struct ThreadArgs *) threadArg ) -> port;
-	myName = registerPlayer(IP, port, sockfd); //cal this here
+	myName = registerPlayer(port, sockfd); //cal this here
 	free(threadArg);
 	
 	if(myName.compare("") != 0){ //actually registered a name
@@ -303,6 +309,7 @@ void *serverOutput(void *threadArg){
 		}
 			
 	}
+	close(sockfd);
 }
 
 void *P2Phost(void *P2Parg){ //thread spawned for BINGO hosts
@@ -316,7 +323,7 @@ void *P2Phost(void *P2Parg){ //thread spawned for BINGO hosts
 	pCount = ((struct P2Pargs *) P2Parg ) -> pCount;
 	returnSocket = ((struct P2Pargs *) P2Parg ) -> serverSocket; //where to send end command at completion
 	free(P2Parg);
-	
+
 	int sock, connfd;                /* Socket */
     struct sockaddr_in hostAddr; /* Local address */
     struct sockaddr_in playAddr; /* Client address */
@@ -329,7 +336,7 @@ void *P2Phost(void *P2Parg){ //thread spawned for BINGO hosts
     memset(&hostAddr, 0, sizeof(hostAddr));   /* Zero out structure */
     hostAddr.sin_family = AF_INET;                /* Internet address family */
     hostAddr.sin_addr.s_addr = htonl(INADDR_ANY); /* Any incoming interface */
-    hostAddr.sin_port = htons(hostPort);      /* Local port */
+    hostAddr.sin_port = hostPort;      /* Local port */
 	
 	if (bind(sock, (struct sockaddr *) &hostAddr, sizeof(hostAddr)) < 0)
         DieWithError("server: bind() failed");
@@ -342,6 +349,7 @@ void *P2Phost(void *P2Parg){ //thread spawned for BINGO hosts
 	for(int x = 0; x < pCount; x++){ //loop until all expected players have connected
 		cliAddrLen = sizeof(playAddr);
 		sockfd[x] = accept( sock, (struct sockaddr *) &playAddr, &cliAddrLen ); //accept n many connections
+		cout << "Accepted sockfd " << sockfd[x] << endl;
 	}
 	
 	bool stillPlaying = true;
@@ -417,8 +425,9 @@ void *P2Phost(void *P2Parg){ //thread spawned for BINGO hosts
 	stringstream ss;
 	ss << hostPort;
 	message = "End " + ss.str() + " ";
-	write(returnSocket, message.c_str(), message.size());
-	close(sock);
+	write(returnSocket, message.c_str(), message.size()); //notify server the game ended
+	for(int x= 0; x < pCount; x++)
+		close(sockfd[x]);
 	pthread_exit(NULL);
 }
 
@@ -466,7 +475,7 @@ void *P2Pplayer(void *P2Parg){ //thread spawned for BINGO players
 	strcpy(IP, ((struct P2Pargs *) P2Parg ) -> IP); //convert args back to string
 	hostPort = (unsigned short)strtoul(((struct P2Pargs *) P2Parg ) -> port, NULL ,0);
 	free(P2Parg);
-	
+	sleep(2); //player tries to connect before host established
 	int sockfd;
 	struct sockaddr_in hostAddr;
 	
@@ -474,7 +483,7 @@ void *P2Pplayer(void *P2Parg){ //thread spawned for BINGO players
 
 	bzero(&hostAddr, sizeof(hostAddr));
 	hostAddr.sin_family = AF_INET;
-	hostAddr.sin_port = htons(hostPort); //passed handshake port
+	hostAddr.sin_port = hostPort; //passed handshake port
 	inet_pton(AF_INET, IP, &hostAddr.sin_addr);
 	
 	connect(sockfd, (struct sockaddr *) &hostAddr, sizeof(hostAddr));
@@ -561,7 +570,6 @@ void *P2Pplayer(void *P2Parg){ //thread spawned for BINGO players
 					}
 				}
 			}
-			
 			printBINGO(called, myBoard); //print current board state
 			if(checkWin(called)) //see if you've won
 				message = "Win " + myName + " ";
@@ -572,6 +580,7 @@ void *P2Pplayer(void *P2Parg){ //thread spawned for BINGO players
 		
 	}
 	write(sockfd, "End", 4); //some one won, tell host you are successfully disconnecting
+	close(sockfd);
 	cout << "END" << endl;
 	pthread_exit(NULL);
 }
@@ -588,7 +597,7 @@ int main(int argc, char **argv){
 
 	bzero(&servaddr, sizeof(servaddr));
 	servaddr.sin_family = AF_INET;
-	servaddr.sin_port = htons(36000); //hardcoded handshake port
+	servaddr.sin_port = 36000; //hardcoded handshake port
 	inet_pton(AF_INET, argv[1], &servaddr.sin_addr);
 	
 	connect(sockfd, (struct sockaddr *) &servaddr, sizeof(servaddr));
